@@ -35,13 +35,9 @@ END_LEGAL */
 
 /*! @file
  *  This file is for evaluation for volatile PCM.
- *  It collects the basic statistics for the real trace, 
- *  and profiles the life time of each Memory Write Instruction (MWI).
- * 
- *  	First Time: during the first time running, it cannot collect all slow-write count, 
- *  since a slow-write instruction may be found to be slow later.
- *  	Second Time: by reading the slow-write instruction set from a external file, it can 
- *  completely find the slow-write instruction count.
+ *  1) It collects write-energy for each 32-bit PCM block for endurance evaluation
+ *  2) It collects write-interval distribution for the motivation
+ *  3) It collects write-mode distribution for write-mode-selection motivation, in the Second Time
  */
 
 
@@ -51,17 +47,13 @@ END_LEGAL */
 #include <fstream>
 #include <map>
 #include <sstream>
-//#include "cacheHybrid.H"
+#include <set>
 
 #define SecondTime
 
 #define MACHINE32
 
 
-#undef USER_PROFILE
-//#define USER_PROFILE
-
-//typedef unsigned int UINT32;
 /* ===================================================================== */
 /* Commandline Switches */
 /* ===================================================================== */
@@ -77,9 +69,6 @@ KNOB<string> KnobOutputFile(KNOB_MODE_WRITEONCE,    "pintool",
 bool g_bStartSimu = false;	
 #endif
 
-
-//typedef int64_t INT64;
-
 //const UINT64 R_fastW = 1870000L;
 //const UINT64 R_fastW =  935000L;
 //const UINT64 R_fastW =  467500L;
@@ -88,39 +77,44 @@ bool g_bStartSimu = false;
 //const UINT64 R_fastW =  58437L;
 //const UINT64 R_fastW =  29218L;
 const UINT64 R_fastW =  14609L;
-//const UINT64 R_fastW =  7305L;
-
-const UINT64 R_slowW = 11158840000ULL;
+const UINT64 R_slowW = 11158840000LLU;
 const UINT64 C_i = 1;
 const UINT64 C_r = 1;
 const UINT32 C_fastW = 3;
 const UINT32 C_slowW = 10;
-const double E_r = 96.0;
-const double E_fastW = 19.2 + 13.5*3;
-const double E_slowW = 19.2 + 13.5*10;
+const double E_r = 3.0*16;
+const double E_fastW = (19.2 + 13.5*3)*16;
+const double E_slowW = (19.2 + 7.72*10)*16;
 ADDRINT g_nClock = 0;
-ADDRINT g_nTotalCell = 0;
+UINT64 g_nRefresh = 0;
 
-ADDRINT g_nTotalWrite = 0;
-ADDRINT g_nTotalWriteL = 0;
-ADDRINT g_nTotalWriteLstatic = 0;
-ADDRINT g_nTotalWriteLideal = 0;
-ADDRINT g_nTotalRead = 0;
-ADDRINT g_nTotalInst = 0;
 
-ADDRINT g_nTotalRefreshFast = 0;
-ADDRINT g_nTotalRefreshSlow = 0;
 
-ADDRINT g_nClockSlow = 0;
-double g_nTotalEnergyFast = 0.0;
-double g_nTotalEnergySlow = 0.0;
 //std::map<UINT32, UINT64> g_hInterval;
-
+UINT64 g_nTotalRead = 0;
+UINT64 g_nTotalInst = 0;
+UINT64 g_nTotalWrite = 0;
+UINT64 g_nTotalWriteL;
+UINT64 g_nTotalWriteLstatic;
 std::map<ADDRINT, UINT64> g_hWriteInstL;
 std::map<ADDRINT, bool> g_hWriteInstIsL;
 std::map<ADDRINT, UINT64> g_hLastR;
 std::map<ADDRINT, UINT64> g_hLastW;
 std::map<ADDRINT, ADDRINT> g_hMem2InstW;
+
+std::map<ADDRINT, UINT64> g_hFastW;  	// for 1)
+std::map<ADDRINT, UINT64> g_hSlowW;
+std::map<ADDRINT, UINT64> g_hIdealSlowW;
+std::map<ADDRINT, UINT64> g_hIdealFastW;
+
+UINT64 g_nTotalInterval = 0;             	// for 2)
+std::map<UINT32, UINT64> g_hInterval;
+
+UINT64	g_nFastCount = 0;					// for 3)
+UINT64 g_nTotalFast = 0;
+std::map<UINT32, UINT64> g_hFastCount;
+
+std::set<ADDRINT> g_footprint;
 /* ===================================================================== */
 /* Print Help Message                                                    */
 /* ===================================================================== */
@@ -148,12 +142,15 @@ void UnsetSimu()
 }
 #endif
 
-UINT32 OrderNum(ADDRINT interval)
+UINT32 OrderNum(ADDRINT interval, UINT32 granu)
 {
-	UINT32 order = -1;
+	if( interval == 0)
+		return 0;
+		
+	UINT32 order = 0;
 	do
 	{
-		interval = interval >> 2;   // 4^
+		interval = interval >> granu;   // 4^
 		++ order;
 	}while( interval > 0);
 	return order;
@@ -168,9 +165,9 @@ VOID LoadMulti(ADDRINT addr, UINT32 size)
 #ifdef MACHINE32
 	addr = addr & 0xfffffffc;
 #else
-	addr = addr & 0xfffffffffffffffc;
-	//cerr << "L: " << addr << "-" << g_nClock << endl;
+	addr = addr & 0xfffffffffffffffcLLU;
 #endif
+	//cerr << "L: " << addr << "-" << g_nClock << endl;
     // first level D-cache
 
 	g_nTotalRead += size;
@@ -186,21 +183,27 @@ VOID LoadMulti(ADDRINT addr, UINT32 size)
 
 VOID StoreMulti(ADDRINT iAddr, ADDRINT addr, UINT32 size)
 {
-	size = size/4;
-
+	size = (size+3)/4;
 #ifdef MACHINE32
 	addr = addr & 0xfffffffc;
 #else
-	addr = addr & 0xfffffffffffffffc;
-	//cerr << "L: " << addr << "-" << g_nClock << endl;
+	addr = addr & 0xfffffffffffffffcLLU;
 #endif
-	g_nTotalWrite += size;
-
 	
+	//cerr << "L: " << addr << "-" << g_nClock << endl;
+
+	g_nTotalWrite += size;
+	g_nClock += C_fastW * size;
+	for( UINT32 i = 0; i < size; ++ i)
+	{
+		ADDRINT addr1 = addr + i;
+		g_footprint.insert(addr1);
+	}
+/*	
     for( UINT32 i = 0; i < size; ++ i)
 	{
-		g_nClock += C_fastW;
-		ADDRINT addr1 = addr + (i << 2);
+		
+		ADDRINT addr1 = addr + 1;
 		//cerr << "S: " << addr1 << "-" << g_nClock << endl;
 		// obtain the instruction which accesses addr1 most recently
 		std::map<ADDRINT, ADDRINT>::iterator flagP = g_hMem2InstW.find(addr1);
@@ -214,8 +217,21 @@ VOID StoreMulti(ADDRINT iAddr, ADDRINT addr, UINT32 size)
 		ADDRINT lastIaddrW = flagP->second;
 		
 		// count the execution count for each long-write instruction
+		bool bSlowInst = false;
 		if( g_hWriteInstL.find(lastIaddrW) != g_hWriteInstL.end() )
-			++ g_hWriteInstL[lastIaddrW];
+		{
+			++ g_hWriteInstL[lastIaddrW];	
+			UINT32 order = OrderNum(g_nFastCount, 1);
+			++ g_hFastCount[order];
+			g_nFastCount = 0;        // reset g_nFastCount
+			
+			bSlowInst = true;
+		}
+		else
+		{
+			++ g_nFastCount;
+			++ g_nTotalFast;
+		}
 		
 		
 		std::map<ADDRINT, UINT64>::iterator R = g_hLastR.find(addr1);
@@ -224,27 +240,65 @@ VOID StoreMulti(ADDRINT iAddr, ADDRINT addr, UINT32 size)
 		{
 			INT64 interval = R->second - W->second;
 			
+			std::map<ADDRINT, UINT64>::iterator fastP = g_hFastW.find( addr1);
+			if( fastP == g_hFastW.end() )
+			{
+				g_hFastW[addr1] = 0;
+				fastP = g_hFastW.find( addr1);
+			}
+			std::map<ADDRINT, UINT64>::iterator slowP = g_hSlowW.find( addr1);
+			if( slowP == g_hSlowW.end() )
+			{
+				g_hSlowW[addr1] = 0;
+				slowP = g_hSlowW.find( addr1);
+			}
+			if( bSlowInst)
+				++ slowP->second;
+			else
+				++ fastP->second;
+			std::map<ADDRINT, UINT64>::iterator ifastP = g_hIdealFastW.find( addr1);
+			if( ifastP == g_hIdealFastW.end() )
+			{
+				g_hIdealFastW[addr1] = 0;
+				ifastP = g_hIdealFastW.find( addr1);
+			}
+			std::map<ADDRINT, UINT64>::iterator islowP = g_hIdealSlowW.find( addr1);
+			if( islowP == g_hIdealSlowW.end() )
+			{
+				g_hIdealSlowW[addr1] = 0;
+				islowP = g_hIdealSlowW.find( addr1);
+			}
+			
 			if( interval > 0)
 			{
-			//	++ g_nTotalInterval;
-				//UINT32 order = OrderNum(interval);
-				//++ g_hInterval[order];
+				++ g_nTotalInterval;
+				UINT32 order = OrderNum(interval, 2);
+				++ g_hInterval[order];
 				
 				if( ((UINT64)interval) >= R_fastW )
 				{
-					++ g_nTotalWriteLideal;				
+					++ g_nTotalWriteL;				
 				
 					if( g_hWriteInstL.find(lastIaddrW) == g_hWriteInstL.end() )
-						g_hWriteInstL[lastIaddrW] = 1;				
-					//if(g_hWriteInstIsL[lastIaddrW] == false)
+						g_hWriteInstL[lastIaddrW] = 1;			
 					g_hWriteInstIsL[lastIaddrW] = true;
+					++ islowP->second;
 				}
+				else
+					++ ifastP->second;
+			}
+			else
+			{
+				++ ifastP->second;
+				++ g_nTotalInterval;
+				++ g_hInterval[0];
 			}
 		}
 		// update the write-mark
 		g_hLastW[addr1] = g_nClock;
 		g_hMem2InstW[addr1] = iAddr;
 	}
+*/
 }
 
 /* ===================================================================== */
@@ -256,10 +310,9 @@ VOID LoadSingle(ADDRINT addr)
 #ifdef MACHINE32
 	addr = addr & 0xfffffffc;
 #else
-	addr = addr & 0xfffffffffffffffc;
-	//cerr << "L: " << addr << "-" << g_nClock << endl;
+	addr = addr & 0xfffffffffffffffcLLU;
 #endif
-
+	//cerr << "L: " << addr << "-" << g_nClock << endl;
 	//cerr << "L: " << addr << "-" << g_nClock << endl;
 
     g_hLastR[addr] = g_nClock;
@@ -274,11 +327,14 @@ VOID StoreSingle(ADDRINT iAddr, ADDRINT addr)
 #ifdef MACHINE32
 	addr = addr & 0xfffffffc;
 #else
-	addr = addr & 0xfffffffffffffffc;
-	//cerr << "L: " << addr << "-" << g_nClock << endl;
+	addr = addr & 0xfffffffffffffffcLLU;
 #endif
+	g_footprint.insert(addr);
+/*
+	//cerr << "L: " << addr << "-" << g_nClock << endl;
 	//cerr << "S: " << addr << "-" << g_nClock << endl;
 	ADDRINT addr1 = addr;
+	
 	// obtain the instruction which accesses addr1 most recently
 	std::map<ADDRINT, ADDRINT>::iterator flagP = g_hMem2InstW.find(addr1);
 	if( flagP == g_hMem2InstW.end() )    // if no previous write, update write-mark and skip it
@@ -291,8 +347,22 @@ VOID StoreSingle(ADDRINT iAddr, ADDRINT addr)
 	ADDRINT lastIaddrW = flagP->second;
 	
 	// count the execution count for each long-write instruction
+	bool bSlowInst = false;
 	if( g_hWriteInstL.find(lastIaddrW) != g_hWriteInstL.end() )
+	{
 		++ g_hWriteInstL[lastIaddrW];	
+		UINT32 order = OrderNum(g_nFastCount, 1);
+		++ g_hFastCount[order];
+		g_nFastCount = 0;        // reset g_nFastCount
+		
+		bSlowInst = true;
+	}
+	else
+	{
+		++ g_nFastCount;
+		++ g_nTotalFast;
+	}
+	
 	
 	
 	std::map<ADDRINT, UINT64>::iterator R = g_hLastR.find(addr1);
@@ -301,32 +371,70 @@ VOID StoreSingle(ADDRINT iAddr, ADDRINT addr)
 	{
 		INT64 interval = R->second - W->second;
 		
+		std::map<ADDRINT, UINT64>::iterator fastP = g_hFastW.find( addr1);
+		if( fastP == g_hFastW.end() )
+		{
+			g_hFastW[addr1] = 0;
+			fastP = g_hFastW.find( addr1);
+		}
+		std::map<ADDRINT, UINT64>::iterator slowP = g_hSlowW.find( addr1);
+		if( slowP == g_hSlowW.end() )
+		{
+			g_hSlowW[addr1] = 0;
+			slowP = g_hSlowW.find( addr1);
+		}
+		if( bSlowInst)
+			++ slowP->second;
+		else
+			++ fastP->second;
+		std::map<ADDRINT, UINT64>::iterator ifastP = g_hIdealFastW.find( addr1);
+		if( ifastP == g_hIdealFastW.end() )
+		{
+			g_hIdealFastW[addr1] = 0;
+			ifastP = g_hIdealFastW.find( addr1);
+		}
+		std::map<ADDRINT, UINT64>::iterator islowP = g_hIdealSlowW.find( addr1);
+		if( islowP == g_hIdealSlowW.end() )
+		{
+			g_hIdealSlowW[addr1] = 0;
+			islowP = g_hIdealSlowW.find( addr1);
+		}
+	
+		
 	//	cerr << "interval = " << interval << endl;
 		if( interval > 0)
 		{		
-			// ++ g_nTotalInterval;
-			//UINT32 order = OrderNum(interval);
-			//++ g_hInterval[order];
+			++ g_nTotalInterval;
+			UINT32 order = OrderNum(interval, 2);
+			++ g_hInterval[order];
 			
 			if( ((UINT64)interval) >= R_fastW )
 			{
-				++ g_nTotalWriteLideal;				
+				++ g_nTotalWriteL;				
 				
 				if( g_hWriteInstL.find(lastIaddrW) == g_hWriteInstL.end() )
-					g_hWriteInstL[lastIaddrW] = 1;				
-				//if(g_hWriteInstIsL[lastIaddrW] == false)
-					g_hWriteInstIsL[lastIaddrW] = true;
+					g_hWriteInstL[lastIaddrW] = 1;		
+				g_hWriteInstIsL[lastIaddrW] = true;		
+				
+				++ islowP->second;
+			}
+			else
+			{
+				++ ifastP->second;
 			}
 		}
 		else		// indicates sequential writes
 		{
-			
+			++ ifastP->second;
+			++ g_nTotalInterval;
+			++ g_hInterval[0];
 		}
 	}
 	
 	// update the write-mark
 	g_hLastW[addr1] = g_nClock;
 	g_hMem2InstW[addr1] = iAddr;
+*/
 }
 /* ===================================================================== */
 VOID ExecInst()
@@ -432,20 +540,6 @@ VOID Instruction(INS ins, void * v)
 }
 
 /* ===================================================================== */
-VOID RefreshComputation()
-{
-	g_nTotalCell = g_hLastW.size();
-	std::map<ADDRINT, UINT64>::iterator I = g_hLastW.begin(), E = g_hLastW.end();
-	for(; I != E; ++ I)
-	{
-		UINT64 nStart = I->second;
-		UINT64 nInterval = g_nClock - nStart;
-		g_nTotalRefreshFast += nInterval/R_fastW;
-		g_nTotalRefreshSlow += nInterval/R_slowW;
-	}
-	
-	g_nClockSlow = g_nClock + g_nTotalWrite * (C_slowW - C_fastW);
-}
 
 VOID ReadLongInstAddr()
 {
@@ -473,17 +567,15 @@ VOID ReadLongInstAddr()
 VOID Fini(int code, VOID * v)
 {
 
-    RefreshComputation();
+	//char buf[256];
+	//sprintf(buf, "%llu", R_fastW);
 	
-	char buf[256];
-	sprintf(buf, "%llu", R_fastW);
-	
-	string szOutFile = KnobOutputFile.Value() + buf;
+	string szOutFile = KnobOutputFile.Value() ;
     std::ofstream out(szOutFile.c_str());
 
     // print D-cache profile
     // @todo what does this print
-	
+	/*
 	
 	// obtain the total # of long write instruction
 	g_nTotalWriteL = g_hWriteInstIsL.size();
@@ -499,6 +591,73 @@ VOID Fini(int code, VOID * v)
 	}
 	out1.close();
 	
+	// output the distribution of write-life-time
+	out << "## distribution of write-life time: \t" << g_nTotalInterval << "\n";
+	std::map<UINT32, UINT64>::iterator I = g_hInterval.begin(), E = g_hInterval.end();
+	for(; I != E; ++ I)
+	{
+		out << I->first << ":\t" << I->second << ":\t" << I->second/(double)g_nTotalInterval << "\n";
+	}
+	
+	// output the distribution of write-mode locality
+	out << "## distribution of fast-write locality:\t" << g_nTotalFast << "\n";
+	I = g_hFastCount.begin(), E = g_hFastCount.end();
+	for(; I != E; ++ I)
+	{
+		out << I->first << ":\t" << I->second << ":\t" << I->second/(double)g_nTotalFast << "\n";
+	}
+	// output the most written PCM cell
+	// 1) worst energy
+	std::map<ADDRINT, double> hWriteEnergy;	
+	double dWorstEnergy = 0.0;
+	std::map<ADDRINT, UINT64>::iterator J = g_hFastW.begin(), JE = g_hFastW.end();
+	for(; J != JE; ++ J)
+		hWriteEnergy[J->first] = hWriteEnergy[J->first] + J->second * E_fastW;
+	J = g_hSlowW.begin(), JE = g_hSlowW.end();
+	for(; J != JE; ++ J)
+		hWriteEnergy[J->first] = hWriteEnergy[J->first] + J->second * E_slowW;
+	std::map<ADDRINT, double>::iterator K = hWriteEnergy.begin(), KE = hWriteEnergy.end();
+	for(; K != KE; ++ K)
+		if( K->second > dWorstEnergy)
+			dWorstEnergy = K->second;
+			
+	// 2) ideally worst energy
+	std::map<ADDRINT, double> hIdealWriteEnergy;	
+	double dIdealWorstEnergy = 0.0;
+	J = g_hIdealFastW.begin(), JE = g_hIdealFastW.end();
+	for(; J != JE; ++ J)
+		hIdealWriteEnergy[J->first] = hIdealWriteEnergy[J->first] + J->second * E_fastW;
+	J = g_hIdealSlowW.begin(), JE = g_hIdealSlowW.end();
+	for(; J != JE; ++ J)
+		hIdealWriteEnergy[J->first] = hIdealWriteEnergy[J->first] + J->second * E_slowW;
+	K = hIdealWriteEnergy.begin(), KE = hIdealWriteEnergy.end();
+	for(; K != KE; ++ K)
+		if( K->second > dIdealWorstEnergy)
+			dIdealWorstEnergy = K->second;
+			
+	// 3) fast energy
+	std::map<ADDRINT, double> hFastWriteEnergy;	
+	double dFastWorstEnergy = 0.0;
+	J = g_hIdealFastW.begin(), JE = g_hIdealFastW.end();
+	for(; J != JE; ++ J)
+		hFastWriteEnergy[J->first] = hFastWriteEnergy[J->first] + J->second * E_fastW;
+	J = g_hIdealSlowW.begin(), JE = g_hIdealSlowW.end();
+	for(; J != JE; ++ J)
+		hFastWriteEnergy[J->first] = hFastWriteEnergy[J->first] + J->second * E_fastW;
+	K = hFastWriteEnergy.begin(), KE = hFastWriteEnergy.end();
+	for(; K != KE; ++ K)
+		if( K->second > dFastWorstEnergy)
+			dFastWorstEnergy = K->second;
+			
+	// 4) slow energy
+	double dSlowWorstEnergy = 0.0;
+	dSlowWorstEnergy = dFastWorstEnergy * (E_slowW - E_fastW);
+	
+	g_nRefresh = g_nClock/1870000;
+	//dFastWorstEnergy = dFastWorstEnergy + g_nRefresh ()
+			
+		*/	
+	
     
     out << "PIN:MEMLATENCIES 1.0. 0x0\n";
             
@@ -506,17 +665,22 @@ VOID Fini(int code, VOID * v)
         "#\n"
         "# DCACHE stats\n"
         "#\n";    
-	out << "Total memory cells:\t" << g_nTotalCell << endl;
+	//out << "Total memory cells:\t" << g_nTotalCell << endl;
 	out << "Total Instruction:\t" << g_nTotalInst << endl;
 	out << "Total Reads:\t" << g_nTotalRead << endl;
 	out << "Total Writes:\t" << g_nTotalWrite << endl;    
 	out << "Total fast-clock:\t" << g_nClock << endl;
-	out << "Total fast refresh:\t" << g_nTotalRefreshFast << endl;
-	out << "Total slow-write instruction:\t" << g_nTotalWriteL << ":\t" << g_hWriteInstL.size() << endl;
-	out << "Total slow-write instruction-count:\t" << g_nTotalWriteLstatic << endl;
-	out << "Total ideal slow-write inst-count:\t" << g_nTotalWriteLideal << endl;
-	out << "Total slow-clock:\t" << g_nClockSlow << endl;
-	out << "Total slow refresh:\t" << g_nTotalRefreshSlow << endl;
+	out << "Total footprint in Byte:\t" << g_footprint.size() * 4 << endl;
+	//out << "Total refresh:\t" << g_nRefresh << endl;
+	//out << "Fast Worst Energy:\t" << dFastWorstEnergy << endl;
+	//out << "Slow Worst Energy:\t" << dSlowWorstEnergy << endl;
+	//out << "Worst Write Energy:\t" << dWorstEnergy << endl;
+	//out << "Worst Write Energy Ideally:\t" << dIdealWorstEnergy << endl;
+	//out << "Total fast refresh:\t" << g_nTotalRefreshFast << endl;
+	//out << "Total slow-write instruction:\t" << g_nTotalWriteL << ":\t" << g_hWriteInstL.size() << endl;
+	//out << "Total slow-write instruction-count:\t" << g_nTotalWriteLstatic << endl;
+	//out << "Total slow-clock:\t" << g_nClockSlow << endl;
+	//out << "Total slow refresh:\t" << g_nTotalRefreshSlow << endl;
 	
       
     out.close();
