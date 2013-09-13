@@ -50,6 +50,8 @@ END_LEGAL */
 //#include "dcache.H"
 #include "pin_profile.H"
 
+//#define ONLY_MAIN
+
 std::ofstream g_outFile;
 
 /* ===================================================================== */
@@ -110,12 +112,15 @@ VOID FuncEntry(ADDRINT addr)
 {
 	
 	
+#ifdef ONLY_MAIN
+	
 	string szFunc = g_hAddr2Func[addr];
 	if( szFunc == "main")
 		g_bEnable = true;
-	
+
 	if( !g_bEnable)
 		return;
+#endif
 	
 	//DumpSpace(g_funcStack.size());	
 	
@@ -128,6 +133,8 @@ VOID FuncEntry(ADDRINT addr)
 
 VOID FuncExit(ADDRINT addr)
 {		
+#ifdef ONLY_MAIN 
+
 	if( !g_bEnable)
 		return;
 	string szFunc = g_hAddr2Func[addr];
@@ -136,6 +143,7 @@ VOID FuncExit(ADDRINT addr)
 		g_bEnable = false;
 		//cerr << "==========ending profiling" << endl;
 	}
+#endif
 	//DumpSpace(g_funcStack.size()-1);
 	//cerr << hex << g_funcStack.size() << "-" << (ADDRT)addr << dec << "#" << g_funcStack.back() << szFunc << endl; 
 	//ASSERTX(g_nFuncCount == g_funcStack.back() );
@@ -153,8 +161,10 @@ VOID LoadMulti(ADDRINT addr, UINT32 size)
 
 VOID StoreMulti(ADDRINT addr, UINT32 size)
 {
+#ifdef ONLY_MAIN
 	if(!g_bEnable)
 		return;
+#endif
     UINT32 nSize = size >> 2;
 	UINT32 alignedAddr = addr >> g_nProfDistPower;
 	g_WriteR[alignedAddr] += nSize;
@@ -171,8 +181,10 @@ VOID LoadSingle(ADDRINT addr)
 
 VOID StoreSingle(ADDRINT addr, ADDRINT iaddr)
 {
+#ifdef ONLY_MAIN
 	if(!g_bEnable)
 		return;
+#endif
 	UINT32 alignedAddr = addr >> g_nProfDistPower;
     ++ g_WriteR[alignedAddr];
 	g_Write2Funcs[alignedAddr].insert(g_funcStack.back());

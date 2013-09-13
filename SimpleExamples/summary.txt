@@ -37,4 +37,10 @@ output: ...
 input: the encoded trace
 output: the life time intervals for each write
  
+== for PCM wear levelling:
+1. pwlWriteDist.cpp
+input: the profiling distance
+output: the number of writes as well as functions for each distance
 
+2. pwlWriteDist1.cpp
+It is the same to pwlWriteDist.cpp, except that it is only concerned with user functions.
