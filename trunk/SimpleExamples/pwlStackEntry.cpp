@@ -50,7 +50,7 @@ END_LEGAL */
 //#include "dcache.H"
 #include "pin_profile.H"
 
-//#define ONLY_MAIN
+#define ONLY_MAIN
 
 
 /* ===================================================================== */
@@ -60,7 +60,7 @@ END_LEGAL */
 KNOB<string> KnobOutputFile(KNOB_MODE_WRITEONCE,    "pintool",
     "o", "stack.out", "specify dcache file name");
 KNOB<UINT32> KnobProfDistance(KNOB_MODE_WRITEONCE, "pintool",
-    "d","2", "profing distance power: n -> 2^n");
+    "d","3", "profing distance power: n -> 2^n");
 
 
 
@@ -81,7 +81,7 @@ INT32 Usage()
 /* ===================================================================== */
 /* Global Variables */
 /* ===================================================================== */
-typedef UINT32 ADDRT;
+
 //typedef int64_t INT64;
 
 UINT32 g_nProfDistPower = 2;
@@ -89,18 +89,18 @@ std::ofstream g_outFile;
 
 
 UINT64 g_nFuncCount = 0;		  // unique ID for each function instance
-std::list<UINT32> g_InstanceStack;   // the function instance stack
-std::list<UINT32> g_FuncStack; // function stack
+std::list<UINT64> g_InstanceStack;   // the function instance stack
 std::list<ADDRINT> g_RetStack; // stack for return addresses
 
-std::list<pair<UINT32, bool> > g_InstanceTrace; 
+std::list<pair<UINT64, bool> > g_InstanceTrace; 
 
 // storage for efficiency
 std::map<ADDRINT, string> g_hAddr2Func;
 
 
-std::map<UINT32, UINT64> g_hFunc2W; // map function instance to number of writes
-std::map<UINT32, UINT64> g_hFuncInst2Addr; // map function instance to function address
+
+std::map<UINT64, UINT64> g_hFunc2W; // map function instance to number of writes
+std::map<UINT64, UINT64> g_hFuncInst2Addr; // map function instance to function address
 std::map<ADDRINT, UINT32> g_hFunc2StackSize; // map function address to stack size
 
 // switch to control the profiling
@@ -132,7 +132,7 @@ VOID BeforeCall(ADDRINT nextAddr, ADDRINT callee )
 	++ g_nFuncCount;	
 	g_hFuncInst2Addr[g_nFuncCount] = callee;
 	g_InstanceStack.push_back(g_nFuncCount);			
-	g_InstanceTrace.push_back(pair<UINT32, bool>(g_nFuncCount, true) );
+	g_InstanceTrace.push_back(pair<UINT64, bool>(g_nFuncCount, true) );
 
 	g_RetStack.push_back(nextAddr);
 }
@@ -147,7 +147,7 @@ VOID AfterCall(ADDRINT iAddr )
 	
 	if( iAddr == g_RetStack.back() )  // to identify a function return address
 	{
-		g_InstanceTrace.push_back(pair<UINT32, bool>(g_InstanceStack.back(), false) );
+		g_InstanceTrace.push_back(pair<UINT64, bool>(g_InstanceStack.back(), false) );
 
 #ifdef ONLY_MAIN	
 		ADDRINT fAddr = g_hFuncInst2Addr[g_InstanceStack.back()];
@@ -166,16 +166,16 @@ VOID AfterCall(ADDRINT iAddr )
 
 /* ===================================================================== */
 
-VOID StoreMulti(ADDRINT addr, UINT32 size)
+VOID StoreMulti(ADDRINT addr, UINT64 size)
 {
 #ifdef ONLY_MAIN
 	if(!g_bEnable)
 		return;
 #endif
-    	UINT32 nSize = size >> 2;     // 32-bit memory width, which equals 2^2 bytes
-	//UINT32 alignedAddr = addr >> g_nProfDistPower;
+    	UINT64 nSize = size >> 2;     // 32-bit memory width, which equals 2^2 bytes
+	//UINT64 alignedAddr = addr >> g_nProfDistPower;
 	//g_WriteR[alignedAddr] += nSize;
-	UINT32 nFuncI = g_InstanceStack.back();
+	UINT64 nFuncI = g_InstanceStack.back();
 	g_hFunc2W[nFuncI] += nSize;
 }
 
@@ -187,9 +187,9 @@ VOID StoreSingle(ADDRINT addr, ADDRINT iaddr)
 	if(!g_bEnable)
 		return;
 #endif
-	//UINT32 alignedAddr = addr >> g_nProfDistPower;
+	//UINT64 alignedAddr = addr >> g_nProfDistPower;
     	//++ g_WriteR[alignedAddr];
-	UINT32 nFuncI = g_InstanceStack.back();
+	UINT64 nFuncI = g_InstanceStack.back();
 	++ g_hFunc2W[nFuncI];
 	
 }
@@ -207,16 +207,29 @@ VOID Routine(RTN rtn, void *v)
 	
 	for(INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins) )
 	{
-		// collecting stack size according to "SUB $0x32, %esp"
+		// collecting stack size according to "SUB 0x20, %esp" or "ADD 0xffffffe0, %esp"
 		if( INS_Opcode(ins) == XED_ICLASS_SUB && 
-			INS_OperandIsReg(ins, 0 ) && INS_OperandReg(ins, 0) == REG_ESP  &&
+			INS_OperandIsReg(ins, 0 ) && INS_OperandReg(ins, 0) == REG_STACK_PTR  &&
 			INS_OperandIsImmediate(ins, 1) )
 		{		                         
-                      
-                        UINT32 nOffset = (UINT32) INS_OperandImmediate(ins, 1);
+           	int nOffset = INS_OperandImmediate(ins, 1);
+			if(nOffset < 0 )
+			{
+				nOffset = -nOffset;
+			}           	
 			g_hFunc2StackSize[fAddr] = nOffset;	                        
 		}
-		
+		else if( INS_Opcode(ins) == XED_ICLASS_ADD && 
+			INS_OperandIsReg(ins, 0 ) && INS_OperandReg(ins, 0) == REG_STACK_PTR  &&
+			INS_OperandIsImmediate(ins, 1) )
+		{
+			int nOffset = INS_OperandImmediate(ins, 1);
+			if(nOffset < 0 )
+			{
+				nOffset = -nOffset;
+			}           	
+			g_hFunc2StackSize[fAddr] = nOffset;	  
+		}		
 	}
 	RTN_Close(rtn);
 }
@@ -291,20 +304,36 @@ VOID Fini(int code, VOID * v)
 	g_outFile <<	"\n\n";
 	g_outFile << "Total function counts:\t" << g_nFuncCount << endl;
 	
-	std::list<pair<UINT32, bool> >::iterator I = g_InstanceTrace.begin(), E = g_InstanceTrace.end();
+	set<UINT64> zFrames;
+	std::list<pair<UINT64, bool> >::iterator I = g_InstanceTrace.begin(), E = g_InstanceTrace.end();
 	for(; I != E; ++ I)
 	{
-		UINT32 funcInst = I->first;
+		UINT64 funcInst = I->first;
 		bool isEntry = I->second;
 		UINT64 funcAddr = g_hFuncInst2Addr[funcInst];
 		//cerr << funcAddr << endl;
-		//string szFunc = g_hAddr2Func[funcAddr];
+		string szFunc = g_hAddr2Func[funcAddr];
 		UINT32 stackSize = g_hFunc2StackSize[funcAddr];
 		UINT64 nWrites = g_hFunc2W[funcInst];
-		if(!isEntry)
-			g_outFile  <<  funcInst << "\t" << stackSize << "\t" << nWrites << endl << dec;
+		// erase the frames with no write to reduce the total number of frames to speed the evaluation
+				
+		if( isEntry)
+		{
+			if( nWrites == 0 || (stackSize ==0 && nWrites < 3) )
+			{
+				zFrames.insert(funcInst);				
+				continue;
+			}
+			g_outFile << hex << ":" << funcInst << endl << dec;
+		}
 		else
-			g_outFile << ":" << funcInst << endl << dec;
+		{
+			if( zFrames.find(funcInst) != zFrames.end() )
+			{				
+				continue;
+			}
+			g_outFile  <<hex << funcInst << "\t" << stackSize << "\t" << nWrites << endl << dec;
+		}
 	}  
     g_outFile.close();
 }
