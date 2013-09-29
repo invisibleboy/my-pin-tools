@@ -60,7 +60,7 @@ END_LEGAL */
 KNOB<string> KnobOutputFile(KNOB_MODE_WRITEONCE,    "pintool",
     "o", "stack.out", "specify dcache file name");
 KNOB<UINT32> KnobProfDistance(KNOB_MODE_WRITEONCE, "pintool",
-    "d","3", "profing distance power: n -> 2^n");
+    "d","5", "profing distance power: n -> 2^n");
 
 
 
@@ -84,7 +84,7 @@ INT32 Usage()
 
 //typedef int64_t INT64;
 
-UINT32 g_nProfDistPower = 3;
+UINT32 g_nProfDistPower = 5;
 std::ofstream g_outFile;
 
 
@@ -179,8 +179,8 @@ VOID StoreMulti(ADDRINT addr, UINT64 size)
 	if( alignedAddr < 0x400000 )
 		return;
 
-	UINT64 nSize = size >> 2; 
-    //UINT64 nSize = size >> nProfDistPower;     // 32-bit memory width, which equals 2^2 bytes
+	UINT64 nSize = size >> 3; 
+    //UINT64 nSize = size >> nProfDistPower;     // 64-bit memory width, which equals 2^3=8 bytes
 	//UINT64 alignedAddr = addr >> g_nProfDistPower;
 	//g_WriteR[alignedAddr] += nSize;
 	UINT64 nFuncI = g_InstanceStack.back();
@@ -344,7 +344,7 @@ VOID Fini(int code, VOID * v)
 				
 		if( isEntry)
 		{			
-			g_outFile << hex << ":" << funcInst << "\t" << stackSize << "\t" << nWrites << endl << dec; 
+			g_outFile << hex << ":" << funcInst << "\t" << nWrites << "\t" << stackSize << endl << dec; 
 		}
 		else
 		{			
@@ -358,7 +358,7 @@ VOID Fini(int code, VOID * v)
 	std::map<ADDRINT, UINT64>::iterator i2i_p = g_hLine2W.begin(), i2i_e = g_hLine2W.end();
 	for(; i2i_p != i2i_e; ++ i2i_p)
 	{
-		g_outFile << hex << (i2i_p->first << 5) << "\t" << (double)i2i_p->second << "\t" << g_hLine2Funcs[i2i_p->first].size()<< endl;
+		g_outFile << hex << (i2i_p->first << 5) << "\t" << dec << (double)i2i_p->second << "\t" << dec << g_hLine2Funcs[i2i_p->first].size()<< endl;
 	}  
     g_outFile.close();
 }
