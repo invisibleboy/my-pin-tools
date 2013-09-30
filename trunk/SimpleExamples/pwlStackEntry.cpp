@@ -50,7 +50,7 @@ END_LEGAL */
 //#include "dcache.H"
 #include "pin_profile.H"
 
-#define ONLY_MAIN
+//#define ONLY_MAIN
 
 
 /* ===================================================================== */
@@ -99,7 +99,7 @@ std::map<ADDRINT, string> g_hAddr2Func;
 
 
 
-std::map<UINT64, UINT64> g_hFunc2W; // map function instance to number of writes
+std::map<UINT64, UINT64> g_hFuncInst2W; // map function instance to number of writes
 std::map<UINT64, UINT64> g_hFuncInst2Addr; // map function instance to function address
 std::map<ADDRINT, UINT32> g_hFunc2StackSize; // map function address to stack size
 
@@ -172,11 +172,13 @@ VOID StoreMulti(ADDRINT addr, UINT64 size)
 	if(!g_bEnable)
 		return;
 #endif
+	if( addr < 0x10000000 )
+		return;
     	UINT64 nSize = size >> 2;     // 32-bit memory width, which equals 2^2 bytes
 	//UINT64 alignedAddr = addr >> g_nProfDistPower;
 	//g_WriteR[alignedAddr] += nSize;
 	UINT64 nFuncI = g_InstanceStack.back();
-	g_hFunc2W[nFuncI] += nSize;
+	g_hFuncInst2W[nFuncI] += nSize;
 }
 
 /* ===================================================================== */
@@ -187,10 +189,12 @@ VOID StoreSingle(ADDRINT addr, ADDRINT iaddr)
 	if(!g_bEnable)
 		return;
 #endif
+	if( addr < 0x10000000 )
+		return;
 	//UINT64 alignedAddr = addr >> g_nProfDistPower;
     	//++ g_WriteR[alignedAddr];
 	UINT64 nFuncI = g_InstanceStack.back();
-	++ g_hFunc2W[nFuncI];
+	++ g_hFuncInst2W[nFuncI];
 	
 }
 
@@ -312,14 +316,16 @@ VOID Fini(int code, VOID * v)
 		bool isEntry = I->second;
 		UINT64 funcAddr = g_hFuncInst2Addr[funcInst];
 		//cerr << funcAddr << endl;
-		string szFunc = g_hAddr2Func[funcAddr];
+
+		//string szFunc = g_hAddr2Func[funcAddr];
+
 		UINT32 stackSize = g_hFunc2StackSize[funcAddr];
-		UINT64 nWrites = g_hFunc2W[funcInst];
+		UINT64 nWrites = g_hFuncInst2W[funcInst];
 		// erase the frames with no write to reduce the total number of frames to speed the evaluation
 				
 		if( isEntry)
 		{
-			if( nWrites == 0 || (stackSize ==0 && nWrites < 3) )
+			if( nWrites == 3 )
 			{
 				zFrames.insert(funcInst);				
 				continue;
