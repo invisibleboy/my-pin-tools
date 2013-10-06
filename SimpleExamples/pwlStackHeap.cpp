@@ -34,8 +34,15 @@ END_LEGAL */
 //
 
 /*! @file
- *  This file contains an ISA-portable cache simulator
- *  data cache hierarchies
+ *  This file collects the stack frame trace as well as the dynamic allocation trace.
+ *  1. For dynamic allocation trace:
+ *  1) The "alloc" class functions are instrumented to track the block trace, as well its size and address (size per block)
+ *  2) The memory write operations are tracked and analyzed to determine the target block (writes per block)
+ * 
+ *  2. For stack frame trace:
+ *  1) The "call" instruction and the next instruction (function return address) are instrumented to track the frame trace 
+ *  2) The "SUB/ADD ESP" instructions are tracked to determine the frame size (size per frame)
+ *  3) The stack write operations are tracked and analyzed to determine the target frame (writes per frame)
  */
 
 
@@ -51,6 +58,7 @@ END_LEGAL */
 #include "pin_profile.H"
 
 //#define ONLY_MAIN
+#define ZERO_STACK
 
 /* ===================================================================== */
 /* Names of malloc and free */
@@ -70,7 +78,7 @@ END_LEGAL */
 KNOB<string> KnobOutputFile(KNOB_MODE_WRITEONCE,    "pintool",
     "o", "stack.out", "specify dcache file name");
 KNOB<UINT32> KnobProfDistance(KNOB_MODE_WRITEONCE, "pintool",
-    "d","5", "profing distance power: n -> 2^n");
+    "d","4", "profing distance power: n -> 2^n");
 
 
 
@@ -92,29 +100,40 @@ INT32 Usage()
 /* Global Variables */
 /* ===================================================================== */
 
-UINT32 g_nProfDistPower = 5;
+UINT32 g_nProfDistPower = 4;
 std::ofstream g_outFile;
 
 
-UINT64 g_nFuncCount = 0;		  // unique ID for each function instance
-std::list<UINT64> g_InstanceStack;   // the function instance stack
+UINT64 g_nFrameCount = 0;		  // unique ID for each frame
+UINT64 g_nAllocCount = 0;		// unique ID for each dynamic allocation
+
+std::list<UINT64> g_FrameStack;   // the frame stack
 std::list<UINT64> g_RetStack; // stack for return addresses
 
-std::list<pair<UINT64, bool> > g_InstanceTrace; 
+std::list<pair<UINT64, bool> > g_FrameTrace; 
 
 // storage for efficiency
-std::map<ADDRINT, string> g_hAddr2Func;
+std::map<ADDRINT, string> g_hAddr2Name;
 
-std::map<UINT64, UINT64> g_hFuncInst2W; // map function instance to number of writes
-std::map<UINT64, UINT64> g_hFuncInst2Addr; // map function instance to function address
-std::map<ADDRINT, UINT32> g_hFunc2StackSize; // map function address to stack size
+std::map<UINT64, UINT64> g_hFrame2W; // map frame to number of writes
+//std::map<UINT64, UINT64> g_hFrame2Func; // map frame to function address
+std::map<UINT64, UINT32> g_hFrame2Size;
+std::map<ADDRINT, UINT32> g_hFunc2FrameSize; // map function address to stack size
 
 // evaluation for motivation
 std::map<ADDRINT, UINT64> g_hLine2W;
-std::map<ADDRINT, std::set<UINT64> > g_hLine2Funcs; 
+std::map<ADDRINT, std::set<UINT64> > g_hLine2Frames;
+//std::map<ADDRINT, std::set<UINT64> > g_hLine2Blocks;
 
 // switch to control the profiling
 bool g_bEnable = false;
+
+
+// for heap area
+std::map<ADDRINT, UINT64> g_Heap;
+
+//std::map<UINT64, UINT32> g_hBlock2Size;
+//std::map<UINT64, UINT64> g_hBlock2W;
 
 
 
@@ -125,24 +144,55 @@ VOID DumpSpace(UINT32 num)
 		cerr << ' ';
 }
 
+
+
 /* ===================================================================== */
-/* Analysis routines                                                     */
+/* Analysis routines for heap objects                                               */
 /* ===================================================================== */
  
-VOID Arg1Before(CHAR * name, ADDRINT size)
+ADDRINT g_nCurrentBlockSize = 0;
+VOID AllocSize(ADDRINT size)
 {
-    cerr << name << "(" << size << ")" << endl;
+	//cerr << hex << "(" << size << ")" << dec << endl;
+	g_nCurrentBlockSize = size;
 }
 
-VOID MallocAfter(ADDRINT ret)
+VOID AllocAddress(ADDRINT startAddr)
 {
-    cerr << "  returns " <<hex << ret << dec << endl;
+	++ g_nFrameCount;			
+	g_hFrame2Size[g_nFrameCount] = g_nCurrentBlockSize;	
+	g_FrameTrace.push_back(pair<UINT64, bool>(g_nFrameCount, true) );	
+	
+	
+	ADDRINT endAddr = startAddr + g_nCurrentBlockSize - 1;
+	ADDRINT line1 = startAddr >> g_nProfDistPower;		// glibc aligns each heap block with 16 (2^4) bytes
+	ADDRINT line2 = endAddr >> g_nProfDistPower;
+	for(ADDRINT i = line1; i <= line2; ++ i )
+	{
+		g_Heap[i] = g_nFrameCount;
+		g_hLine2Frames[i].insert(g_nFrameCount);
+	}
 }
 
+VOID DeallocAddress(ADDRINT startAddr)
+{
+	if( startAddr == 0 )
+		return;
+    //cerr << "  returns " <<hex << ret << dec << endl;
+	g_FrameTrace.push_back(pair<UINT64, bool>(g_nFrameCount, false) );	
+	
+	// This is redundant. Since without memory error, there heap write is only on valid addresses 
+	//ADDRINT line1 = startAddr >> g_nProfDistPower;
+	//g_Heap[line1]->_bValid = false;     
+}
+
+/* ===================================================================== */
+/* Analysis routines for stack frames                                               */
+/* ===================================================================== */
 VOID BeforeCall(ADDRINT nextAddr, ADDRINT callee )
 {
 #ifdef ONLY_MAIN	
-	string szFunc = g_hAddr2Func[callee];
+	string szFunc = g_hAddr2Name[callee];
 	if( szFunc == "main")
 		g_bEnable = true;
 
@@ -152,12 +202,21 @@ VOID BeforeCall(ADDRINT nextAddr, ADDRINT callee )
 	
 	//DumpSpace(g_instanceStack.size());	
 	
-	++ g_nFuncCount;	
-	g_hFuncInst2Addr[g_nFuncCount] = callee;
-	g_InstanceStack.push_back(g_nFuncCount);			
-	g_InstanceTrace.push_back(pair<UINT64, bool>(g_nFuncCount, true) );
+	++ g_nFrameCount;	
+	//g_hFrame2Func[g_nFrameCount] = callee;	
+	
 
+	g_hFrame2Size[g_nFrameCount] = g_hFunc2FrameSize[callee];		
+	g_FrameStack.push_back(g_nFrameCount);	
 	g_RetStack.push_back(nextAddr);
+
+#ifdef ZERO_STACK	
+	if( g_hFrame2Size[g_nFrameCount] != 0 )
+#endif
+	{
+		//cerr << hex << nextAddr << "--calling " << callee << endl;
+		g_FrameTrace.push_back(pair<UINT64, bool>(g_nFrameCount, true) );
+	}	
 }
 
 VOID AfterCall(ADDRINT iAddr )
@@ -170,18 +229,24 @@ VOID AfterCall(ADDRINT iAddr )
 	
 	if( iAddr == g_RetStack.back() )  // to identify a function return address
 	{
-		g_InstanceTrace.push_back(pair<UINT64, bool>(g_InstanceStack.back(), false) );
+		UINT64 frame = g_FrameStack.back();
+#ifdef ZERO_STACK	
+		if( g_hFrame2Size[frame] != 0 )
+#endif
+		{			
+			g_FrameTrace.push_back(pair<UINT64, bool>(frame, false) );
+		}
 
 #ifdef ONLY_MAIN	
-		ADDRINT fAddr = g_hFuncInst2Addr[g_InstanceStack.back()];
-		string szFunc = g_hAddr2Func[fAddr];
+		ADDRINT fAddr = g_hFrame2Func[g_FrameStack.back()];
+		string szFunc = g_hAddr2Name[fAddr];
 		if( szFunc == "main")
 			g_bEnable = false;
 
 		if( !g_bEnable)
 			return;
 #endif
-		g_InstanceStack.pop_back();
+		g_FrameStack.pop_back();
 		g_RetStack.pop_back();
 	}
 }
@@ -195,22 +260,24 @@ VOID StoreMulti(ADDRINT addr, UINT64 size)
 	if(!g_bEnable)
 		return;
 #endif
-	//UINT64 alignedAddr = addr >> g_nProfDistPower;	
-	UINT64 alignedAddr = addr >> 5;
-	if( alignedAddr < 0x400000 )
+
+	UINT64 frame = g_FrameStack.back();
+#ifdef ZERO_STACK	
+	if( g_hFrame2Size[frame] == 0 )
+		return;
+#endif
+	
+	UINT64 line = addr >> g_nProfDistPower;
+	if( line < 0x400000 )
 		return;
 
-	UINT64 nSize = size >> 3; 
-    //UINT64 nSize = size >> nProfDistPower;     // 64-bit memory width, which equals 2^3=8 bytes
-	//UINT64 alignedAddr = addr >> g_nProfDistPower;
-	//g_WriteR[alignedAddr] += nSize;
-	UINT64 nFuncI = g_InstanceStack.back();
-	g_hFuncInst2W[nFuncI] += nSize;
+	UINT64 nSize = size >> 3; 			// 64-bit memory width, which equals 2^3=8 bytes
 
 	
-    g_hLine2W[alignedAddr] += nSize;	
-	//UINT64 fAddr = g_hFuncInst2Addr[g_InstanceStack.back()];
-	g_hLine2Funcs[alignedAddr].insert( g_InstanceStack.back() );	
+	g_hFrame2W[frame] += nSize;
+	
+    g_hLine2W[line] += nSize;	
+	g_hLine2Frames[line].insert( frame );	
 }
 
 /* ===================================================================== */
@@ -221,18 +288,63 @@ VOID StoreSingle(ADDRINT addr, ADDRINT iaddr)
 	if(!g_bEnable)
 		return;
 #endif	
-	UINT64 alignedAddr = addr >> 5;
-	if( alignedAddr < 0x400000 )
+
+	UINT64 frame = g_FrameStack.back();
+#ifdef ZERO_STACK	
+	if( g_hFrame2Size[frame] == 0 )
+		return;
+#endif
+
+	UINT64 line = addr >> g_nProfDistPower;
+	if( line < 0x400000 )
+		return;
+	
+	++ g_hFrame2W[frame];
+
+	//UINT64 line = addr >> g_nProfDistPower;
+	
+    ++ g_hLine2W[line];	
+	g_hLine2Frames[line].insert(frame );	
+}
+
+VOID StoreMultiH(ADDRINT addr, UINT64 size)
+{
+#ifdef ONLY_MAIN
+	if(!g_bEnable)
+		return;
+#endif
+	//UINT64 line = addr >> g_nProfDistPower;	
+	UINT64 line = addr >> g_nProfDistPower;
+	if( line < 0x400000 )
 		return;
 
-	UINT64 nFuncI = g_InstanceStack.back();
-	++ g_hFuncInst2W[nFuncI];
+	if( g_Heap.find(line) == g_Heap.end() )
+		return;
 
-	//UINT64 alignedAddr = addr >> g_nProfDistPower;
+	UINT64 nSize = size >> 3; 		// 64-bit memory width, which equals 2^3=8 bytes
+
+	g_hLine2W[line] += nSize;
+	ADDRINT nBlock = g_Heap[line];
+	++ g_hFrame2W[nBlock];	
+}
+
+/* ===================================================================== */
+
+VOID StoreSingleH(ADDRINT addr, ADDRINT iaddr)
+{
+#ifdef ONLY_MAIN
+	if(!g_bEnable)
+		return;
+#endif	
+	UINT64 line = addr >> g_nProfDistPower;
+
+	if( g_Heap.find(line) == g_Heap.end() )
+		return;	
 	
-    ++ g_hLine2W[alignedAddr];	
-	//UINT64 fAddr = g_hFuncInst2Addr[g_InstanceStack.back()];
-	g_hLine2Funcs[alignedAddr].insert( g_InstanceStack.back() );	
+	++ g_hLine2W[line];
+
+	ADDRINT nBlock = g_Heap[line];
+	++ g_hFrame2W[nBlock];	
 }
 /* ===================================================================== */
 /* Instrumentation routines                                              */
@@ -250,11 +362,10 @@ VOID Image(IMG img, VOID *v)
         RTN_Open(mallocRtn);
 
         // Instrument malloc() to print the input argument value and the return value.
-        RTN_InsertCall(mallocRtn, IPOINT_BEFORE, (AFUNPTR)Arg1Before,
-                       IARG_ADDRINT, MALLOC,
+        RTN_InsertCall(mallocRtn, IPOINT_BEFORE, (AFUNPTR)AllocSize,
                        IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
                        IARG_END);
-        RTN_InsertCall(mallocRtn, IPOINT_AFTER, (AFUNPTR)MallocAfter,
+        RTN_InsertCall(mallocRtn, IPOINT_AFTER, (AFUNPTR)AllocAddress,
                        IARG_FUNCRET_EXITPOINT_VALUE, IARG_END);
 
         RTN_Close(mallocRtn);
@@ -266,56 +377,69 @@ VOID Image(IMG img, VOID *v)
     {
         RTN_Open(freeRtn);
         // Instrument free() to print the input argument value.
-        RTN_InsertCall(freeRtn, IPOINT_BEFORE, (AFUNPTR)Arg1Before,
-                       IARG_ADDRINT, FREE,
+        RTN_InsertCall(freeRtn, IPOINT_BEFORE, (AFUNPTR)DeallocAddress,
                        IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
                        IARG_END);
         RTN_Close(freeRtn);
     }
+
+
+	// Visit all routines to collect frame size
+	for( SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec) )
+	{
+		for( RTN rtn = SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn) )
+		{
+			RTN_Open(rtn);
+
+			// collect user functions as well as their addresses
+			ADDRINT fAddr = RTN_Address(rtn);	
+			string szFunc = RTN_Name(rtn);
+			g_hAddr2Name[fAddr] = szFunc;
+			//cerr << fAddr << ":\t" << szFunc << endl;
+			//bool bFound = false;
+			for(INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins) )
+			{
+				// collecting stack size according to "SUB 0x20, %esp" or "ADD 0xffffffe0, %esp"
+				if( INS_Opcode(ins) == XED_ICLASS_SUB && 
+					INS_OperandIsReg(ins, 0 ) && INS_OperandReg(ins, 0) == REG_STACK_PTR  &&
+					INS_OperandIsImmediate(ins, 1) )
+				{		                         
+				   	int nOffset = INS_OperandImmediate(ins, 1);
+					if(nOffset < 0 )
+					{
+						nOffset = -nOffset;
+					}           	
+					g_hFunc2FrameSize[fAddr] = nOffset;	             
+					//bFound = true;
+					break;           
+				}
+				if( INS_Opcode(ins) == XED_ICLASS_ADD && 
+					INS_OperandIsReg(ins, 0 ) && INS_OperandReg(ins, 0) == REG_STACK_PTR  &&
+					INS_OperandIsImmediate(ins, 1) )
+				{
+					int nOffset = INS_OperandImmediate(ins, 1);
+					if(nOffset < 0 )
+					{
+						nOffset = -nOffset;
+					}           	
+					g_hFunc2FrameSize[fAddr] = nOffset;	  
+					//bFound = true;
+					break;
+				}		
+			}
+			//if( !bFound )
+			//	g_hFunc2FrameSize[fAddr] = 0;
+			RTN_Close(rtn);
+		}
+	}
 }
 
 /* ===================================================================== */
-VOID Routine(RTN rtn, void *v)
-{
-	RTN_Open(rtn);
 
-	// collect user functions as well as their addresses
-	ADDRINT fAddr = RTN_Address(rtn);	
-	string szFunc = RTN_Name(rtn);
-	g_hAddr2Func[fAddr] = szFunc;
-	//cerr << fAddr << ":\t" << szFunc << endl;
-	
-	for(INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins) )
-	{
-		// collecting stack size according to "SUB 0x20, %esp" or "ADD 0xffffffe0, %esp"
-		if( INS_Opcode(ins) == XED_ICLASS_SUB && 
-			INS_OperandIsReg(ins, 0 ) && INS_OperandReg(ins, 0) == REG_STACK_PTR  &&
-			INS_OperandIsImmediate(ins, 1) )
-		{		                         
-           	int nOffset = INS_OperandImmediate(ins, 1);
-			if(nOffset < 0 )
-			{
-				nOffset = -nOffset;
-			}           	
-			g_hFunc2StackSize[fAddr] = nOffset;	                        
-		}
-		else if( INS_Opcode(ins) == XED_ICLASS_ADD && 
-			INS_OperandIsReg(ins, 0 ) && INS_OperandReg(ins, 0) == REG_STACK_PTR  &&
-			INS_OperandIsImmediate(ins, 1) )
-		{
-			int nOffset = INS_OperandImmediate(ins, 1);
-			if(nOffset < 0 )
-			{
-				nOffset = -nOffset;
-			}           	
-			g_hFunc2StackSize[fAddr] = nOffset;	  
-		}		
-	}
-	RTN_Close(rtn);
-}
 
 VOID Instruction(INS ins, void * v)
 {
+	// track the write operations
     if ( INS_IsStackWrite(ins) )
     {
         // map sparse INS addresses to dense IDs
@@ -343,9 +467,33 @@ VOID Instruction(INS ins, void * v)
 		}			
        
     }
+	else if( INS_IsMemoryWrite(ins) )
+	{
+		const UINT32 size = INS_MemoryWriteSize(ins);
+
+        const BOOL   single = (size <= 4);
+                
+		if( single )
+		{
+			INS_InsertPredicatedCall(
+				ins, IPOINT_BEFORE,  (AFUNPTR) StoreSingleH,
+				IARG_MEMORYWRITE_EA,
+				IARG_ADDRINT, INS_Address(ins),
+				IARG_END);
+		}
+		else
+		{
+			INS_InsertPredicatedCall(
+				ins, IPOINT_BEFORE,  (AFUNPTR) StoreMultiH,
+				IARG_MEMORYWRITE_EA,
+				IARG_MEMORYWRITE_SIZE,
+				IARG_END);
+		}			
+	}
 	
+	// track the frame allocation/deallocation
 	// record the count of function entry and exit via "CALL" and "Execution of the return address-instruction" 
-	// assume that the entry instruction will be executed once within each function instance
+	// assume that the entry instruction will be executed once within each frame
 	INS_InsertPredicatedCall(
 		ins, IPOINT_BEFORE,  (AFUNPTR) AfterCall,		
 		IARG_ADDRINT, INS_Address(ins),
@@ -382,20 +530,16 @@ VOID Fini(int code, VOID * v)
         "# Write stats with cell size:\t";
 	g_outFile << (1<<g_nProfDistPower);
 	g_outFile <<	"\n\n";
-	g_outFile << "Total function counts:\t" << g_nFuncCount << endl;	
+	g_outFile << "Total function counts:\t" << g_nFrameCount << endl;	
 	
-	std::list<pair<UINT64, bool> >::iterator I = g_InstanceTrace.begin(), E = g_InstanceTrace.end();
+	std::list<pair<UINT64, bool> >::iterator I = g_FrameTrace.begin(), E = g_FrameTrace.end();
 	for(; I != E; ++ I)
 	{
-		UINT64 funcInst = I->first;
+		UINT64 Frame = I->first;
 		bool isEntry = I->second;
-		UINT64 funcAddr = g_hFuncInst2Addr[funcInst];
-		//cerr << funcAddr << endl;
-
-		//string szFunc = g_hAddr2Func[funcAddr];
-
-		UINT32 stackSize = g_hFunc2StackSize[funcAddr];
-		UINT64 nWrites = g_hFuncInst2W[funcInst];
+		
+		UINT32 size = g_hFrame2Size[Frame];
+		UINT64 nWrites = g_hFrame2W[Frame];
 		// erase the frames with no write to reduce the total number of frames to speed the evaluation
 		if( nWrites == 0 )
 		{						
@@ -404,21 +548,21 @@ VOID Fini(int code, VOID * v)
 				
 		if( isEntry)
 		{			
-			g_outFile << hex << ":" << funcInst << "\t" << dec << stackSize << "\t" << nWrites << endl << dec; 
+			g_outFile << hex << ":" << Frame << "\t" << dec << size << "\t" << nWrites << endl << dec; 
 		}
 		else
 		{			
-			g_outFile  <<hex << funcInst << endl << dec;
+			g_outFile  <<hex << Frame << endl << dec;
 		}
 	}  
     g_outFile.close();
 
 
-	g_outFile.open("stack.out_3_23_2");
+	g_outFile.open("stack.out_4_23_2");
 	std::map<ADDRINT, UINT64>::iterator i2i_p = g_hLine2W.begin(), i2i_e = g_hLine2W.end();
 	for(; i2i_p != i2i_e; ++ i2i_p)
 	{
-		g_outFile << hex << (i2i_p->first << 5) << "\t" <<dec << (double)i2i_p->second << "\t" << g_hLine2Funcs[i2i_p->first].size()<< endl;
+		g_outFile << hex << (i2i_p->first << g_nProfDistPower) << "\t" <<dec << g_hLine2Frames[i2i_p->first].size() << "\t" << (double)i2i_p->second << endl;
 	}  
     g_outFile.close();
 }
@@ -443,8 +587,7 @@ int main(int argc, char *argv[])
     g_outFile.open(szOutFile.c_str());
 
     
-    IMG_AddInstrumentFunction(Image, 0);
-    RTN_AddInstrumentFunction(Routine, 0);    
+    IMG_AddInstrumentFunction(Image, 0);     
     INS_AddInstrumentFunction(Instruction, 0);
 
     PIN_AddFiniFunction(Fini, 0);
