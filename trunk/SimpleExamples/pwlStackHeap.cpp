@@ -355,7 +355,7 @@ VOID Image(IMG img, VOID *v)
     // Instrument the malloc() and free() functions.  Print the input argument
     // of each malloc() or free(), and the return value of malloc().
     //
-    //  Find the malloc() function.
+    // 1. Find the malloc() function.
     RTN mallocRtn = RTN_FindByName(img, MALLOC);
     if (RTN_Valid(mallocRtn))
     {
@@ -371,7 +371,7 @@ VOID Image(IMG img, VOID *v)
         RTN_Close(mallocRtn);
     }
 
-    // Find the free() function.
+    // 2. Find the free() function.
     RTN freeRtn = RTN_FindByName(img, FREE);
     if (RTN_Valid(freeRtn))
     {
@@ -384,7 +384,7 @@ VOID Image(IMG img, VOID *v)
     }
 
 
-	// Visit all routines to collect frame size
+	// 3. Visit all routines to collect frame size
 	for( SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec) )
 	{
 		for( RTN rtn = SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn) )
@@ -558,7 +558,7 @@ VOID Fini(int code, VOID * v)
     g_outFile.close();
 
 
-	g_outFile.open("stack.out_4_23_2");
+	g_outFile.open("stack.out_5_23_2");
 	std::map<ADDRINT, UINT64>::iterator i2i_p = g_hLine2W.begin(), i2i_e = g_hLine2W.end();
 	for(; i2i_p != i2i_e; ++ i2i_p)
 	{
