@@ -43,6 +43,9 @@ END_LEGAL */
  *  1) The "call" instruction and the next instruction (function return address) are instrumented to track the frame trace 
  *  2) The "SUB/ADD ESP" instructions are tracked to determine the frame size (size per frame)
  *  3) The stack write operations are tracked and analyzed to determine the target frame (writes per frame)
+ *
+ *  3. To collect the stack frame trace, enable the STACK macro
+    To collect the heap object trace, enable the HEAP macro
  */
 
 
@@ -59,6 +62,8 @@ END_LEGAL */
 
 //#define ONLY_MAIN
 #define ZERO_STACK
+//#define STACK
+#define HEAP
 
 /* ===================================================================== */
 /* Names of malloc and free */
@@ -326,6 +331,8 @@ VOID StoreMultiH(ADDRINT addr, UINT64 size)
 	g_hLine2W[line] += nSize;
 	ADDRINT nBlock = g_Heap[line];
 	++ g_hFrame2W[nBlock];	
+
+	g_hLine2Frames[line].insert(nBlock);
 }
 
 /* ===================================================================== */
@@ -345,6 +352,8 @@ VOID StoreSingleH(ADDRINT addr, ADDRINT iaddr)
 
 	ADDRINT nBlock = g_Heap[line];
 	++ g_hFrame2W[nBlock];	
+
+	g_hLine2Frames[line].insert(nBlock);
 }
 /* ===================================================================== */
 /* Instrumentation routines                                              */
@@ -352,6 +361,8 @@ VOID StoreSingleH(ADDRINT addr, ADDRINT iaddr)
    
 VOID Image(IMG img, VOID *v)
 {
+
+#ifdef HEAP
     // Instrument the malloc() and free() functions.  Print the input argument
     // of each malloc() or free(), and the return value of malloc().
     //
@@ -382,8 +393,9 @@ VOID Image(IMG img, VOID *v)
                        IARG_END);
         RTN_Close(freeRtn);
     }
+#endif
 
-
+#ifdef STACK
 	// 3. Visit all routines to collect frame size
 	for( SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec) )
 	{
@@ -432,6 +444,7 @@ VOID Image(IMG img, VOID *v)
 			RTN_Close(rtn);
 		}
 	}
+#endif
 }
 
 /* ===================================================================== */
@@ -439,12 +452,13 @@ VOID Image(IMG img, VOID *v)
 
 VOID Instruction(INS ins, void * v)
 {
+
 	// track the write operations
     if ( INS_IsStackWrite(ins) )
     {
         // map sparse INS addresses to dense IDs
         //const ADDRINT iaddr = INS_Address(ins);
-            
+#ifdef STACK            
         const UINT32 size = INS_MemoryWriteSize(ins);
 
         const BOOL   single = (size <= 4);
@@ -465,10 +479,15 @@ VOID Instruction(INS ins, void * v)
 				IARG_MEMORYWRITE_SIZE,
 				IARG_END);
 		}			
-       
+#endif
+		;       
     }
+
+
+
 	else if( INS_IsMemoryWrite(ins) )
 	{
+#ifdef HEAP
 		const UINT32 size = INS_MemoryWriteSize(ins);
 
         const BOOL   single = (size <= 4);
@@ -488,9 +507,13 @@ VOID Instruction(INS ins, void * v)
 				IARG_MEMORYWRITE_EA,
 				IARG_MEMORYWRITE_SIZE,
 				IARG_END);
-		}			
+		}	
+#endif
+		;		
 	}
+
 	
+#ifdef STACK
 	// track the frame allocation/deallocation
 	// record the count of function entry and exit via "CALL" and "Execution of the return address-instruction" 
 	// assume that the entry instruction will be executed once within each frame
@@ -513,7 +536,7 @@ VOID Instruction(INS ins, void * v)
 			IARG_END);		
 	
 	}	
-		
+#endif		
 }
 
 /* ===================================================================== */
@@ -556,7 +579,6 @@ VOID Fini(int code, VOID * v)
 		}
 	}  
     g_outFile.close();
-
 
 	g_outFile.open("stack.out_5_23_2");
 	std::map<ADDRINT, UINT64>::iterator i2i_p = g_hLine2W.begin(), i2i_e = g_hLine2W.end();
