@@ -1,4 +1,4 @@
-==for volatile PCM: submitted to LCTES'2013:
+==for volatile PCM: accepted by LCTES'2013:
 PCM1.cpp
 PCM2.cpp
 
@@ -37,7 +37,7 @@ output: ...
 input: the encoded trace
 output: the life time intervals for each write
  
-== for PCM wear levelling:
+== for PCM wear levelling: accepted by DATE'2014
 1. pwlWriteDist.cpp
 input: the profiling distance
 output: the number of writes as well as functions for each distance
