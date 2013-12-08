@@ -62,8 +62,8 @@ END_LEGAL */
 
 //#define ONLY_MAIN
 #define ZERO_STACK
-//#define STACK
-#define HEAP
+#define STACK
+//#define HEAP
 
 /* ===================================================================== */
 /* Names of malloc and free */
@@ -194,7 +194,7 @@ VOID DeallocAddress(ADDRINT startAddr)
 /* ===================================================================== */
 /* Analysis routines for stack frames                                               */
 /* ===================================================================== */
-VOID BeforeCall(ADDRINT nextAddr, ADDRINT callee )
+VOID CallBegin(ADDRINT nextAddr, ADDRINT callee )
 {
 #ifdef ONLY_MAIN	
 	string szFunc = g_hAddr2Name[callee];
@@ -224,7 +224,7 @@ VOID BeforeCall(ADDRINT nextAddr, ADDRINT callee )
 	}	
 }
 
-VOID AfterCall(ADDRINT iAddr )
+VOID CallEnd(ADDRINT iAddr )
 {
 	if( g_RetStack.empty() )
 		return;
@@ -518,7 +518,7 @@ VOID Instruction(INS ins, void * v)
 	// record the count of function entry and exit via "CALL" and "Execution of the return address-instruction" 
 	// assume that the entry instruction will be executed once within each frame
 	INS_InsertPredicatedCall(
-		ins, IPOINT_BEFORE,  (AFUNPTR) AfterCall,		
+		ins, IPOINT_BEFORE,  (AFUNPTR) CallEnd,		
 		IARG_ADDRINT, INS_Address(ins),
 		IARG_END);
 
@@ -530,7 +530,7 @@ VOID Instruction(INS ins, void * v)
 		//cerr << "->" << callee << endl;	
 	
 		INS_InsertPredicatedCall(
-			ins, IPOINT_BEFORE,  (AFUNPTR) BeforeCall,
+			ins, IPOINT_BEFORE,  (AFUNPTR) CallBegin,
 			IARG_ADDRINT, nextAddr,				
 			IARG_BRANCH_TARGET_ADDR,				
 			IARG_END);		
@@ -580,6 +580,7 @@ VOID Fini(int code, VOID * v)
 	}  
     g_outFile.close();
 
+	
 	g_outFile.open("stack.out_5_23_2");
 	std::map<ADDRINT, UINT64>::iterator i2i_p = g_hLine2W.begin(), i2i_e = g_hLine2W.end();
 	for(; i2i_p != i2i_e; ++ i2i_p)
