@@ -118,7 +118,7 @@ VOID DumpSpace(UINT32 num)
 }
 
 
-VOID BeforeCall(ADDRINT nextAddr, ADDRINT callee )
+VOID CallBegin(ADDRINT nextAddr, ADDRINT callee )
 {
 #ifdef ONLY_MAIN	
 	string szFunc = g_hAddr2Func[callee];
@@ -132,14 +132,14 @@ VOID BeforeCall(ADDRINT nextAddr, ADDRINT callee )
 	//DumpSpace(g_instanceStack.size());	
 	
 	++ g_nFuncCount;	
-	g_hFuncInst2Addr[g_nFuncCount] = callee;
+	g_hFuncInst2Addr[g_nFuncCount] = callee;    // to record the map from function instance id to function address
 	g_InstanceStack.push_back(g_nFuncCount);			
-	g_InstanceTrace.push_back(pair<UINT64, bool>(g_nFuncCount, true) );
+	g_InstanceTrace.push_back(pair<UINT64, bool>(g_nFuncCount, true) ); 
 
 	g_RetStack.push_back(nextAddr);
 }
 
-VOID AfterCall(ADDRINT iAddr )
+VOID CallEnd(ADDRINT iAddr )
 {
 	if( g_RetStack.empty() )
 		return;
@@ -211,7 +211,7 @@ VOID StoreSingle(ADDRINT addr, ADDRINT iaddr)
 	
     ++ g_hLine2W[alignedAddr];	
 	//UINT64 fAddr = g_hFuncInst2Addr[g_InstanceStack.back()];
-	g_hLine2Funcs[alignedAddr].insert( g_InstanceStack.back() );	
+	g_hLine2Funcs[alignedAddr].insert( nFuncI );	
 }
 
 /* ===================================================================== */
@@ -287,7 +287,7 @@ VOID Instruction(INS ins, void * v)
 	// record the count of function entry and exit via "CALL" and "Execution of the return address-instruction" 
 	// assume that the entry instruction will be executed once within each function instance
 	INS_InsertPredicatedCall(
-		ins, IPOINT_BEFORE,  (AFUNPTR) AfterCall,		
+		ins, IPOINT_BEFORE,  (AFUNPTR) CallEnd,		
 		IARG_ADDRINT, INS_Address(ins),
 		IARG_END);
 
@@ -299,7 +299,7 @@ VOID Instruction(INS ins, void * v)
 		//cerr << "->" << callee << endl;	
 	
 		INS_InsertPredicatedCall(
-			ins, IPOINT_BEFORE,  (AFUNPTR) BeforeCall,
+			ins, IPOINT_BEFORE,  (AFUNPTR) CallBegin,
 			IARG_ADDRINT, nextAddr,				
 			IARG_BRANCH_TARGET_ADDR,				
 			IARG_END);		

@@ -83,7 +83,7 @@ END_LEGAL */
 KNOB<string> KnobOutputFile(KNOB_MODE_WRITEONCE,    "pintool",
     "o", "stack.out", "specify dcache file name");
 KNOB<UINT32> KnobProfDistance(KNOB_MODE_WRITEONCE, "pintool",
-    "d","4", "profing distance power: n -> 2^n");
+    "d","5", "profing distance power: n -> 2^n");
 
 
 
@@ -105,7 +105,7 @@ INT32 Usage()
 /* Global Variables */
 /* ===================================================================== */
 
-UINT32 g_nProfDistPower = 4;
+UINT32 g_nProfDistPower = 5;
 std::ofstream g_outFile;
 
 
