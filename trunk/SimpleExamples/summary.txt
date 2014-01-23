@@ -44,3 +44,6 @@ output: the number of writes as well as functions for each distance
 
 2. pwlWriteDist1.cpp
 It is the same to pwlWriteDist.cpp, except that it is only concerned with user functions.
+
+== for common use ====
+1. IRWCounter: to count the basic features of a benchmark, like insts, reads, writes, footprint
